@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Reverse Beacon Network (www.reversebeacon.net) logging and filter tool"""
-from argparse import ArgumentParser
+import argparse
 import re
-from telnetlib import Telnet
+import telnetlib
+import textwrap
 
 
 HOST = 'telnet.reversebeacon.net'
@@ -15,16 +16,21 @@ RGX = r'^DX de (.*?):\s*(\d+\.\d+)\s*(\S+)\s+' +\
 BANDS = [
         (160, 2500),
         (80, 5000),
+        (60, 6000),
         (40, 8500),
         (30, 12000),
         (20, 16000),
         (17, 19500),
-        (15, 22000),
+        (15, 22500),
         (12, 26500),
-        (10, 45000),
+        (10, 40000),
         (6, 65000),
         (4, 120000),
-        (2, 160000)]
+        (2, 160000),
+        (1.25, 300000),
+        (0.7, 600000),
+        (0.33, 1000000),
+        (0.23, 1400000)]
 
 def band_to_str(band):
     if band < 0:
@@ -40,29 +46,46 @@ def matches(key, val, regex=False):
 
     - None (always True)
     - Value, equatable to val (True on equality)
-    - List of values equatable to val (at least one should match)
     - Regex (with regex=True) (True if str(val) matches key)
-    - List of regexes (with regex=True) (at least one should match)
     - Function from type(val) to bool
+    - A tuple of a key and a boolean, true iff the match should be inverted
+    - A list of the above (at least one should match)
     """
     if key is None:
         return True
     if regex:
         val = str(val)
     if type(key) is list:
-        if regex:
-            for rgx in key:
-                if re.match(key, val):
-                    return True
-            return False
-        else:
-            return val in key
+        for subkey in key:
+            if matches(subkey, val, regex=regex):
+                return True
+        return False
+    if type(key) is tuple:
+        match = matches(key[0], val, regex=regex)
+        return not match if key[1] else match
     if regex:
         return re.match(key, val)
     if callable(key):
         return key(val)
     return key == val
 
+def parse_range_filter(arg):
+    if arg[0:2] == '<=':
+        return lambda x : x <= float(arg[2:].strip())
+    if arg[0:2] == '>=':
+        return lambda x : x >= float(arg[2:].strip())
+    if arg[0:2] == '/=':
+        return lambda x : x != float(arg[2:].strip())
+    if arg[0:1] == '=':
+        return lambda x : x == float(arg[1:].strip())
+    if arg[0:1] == '<':
+        return lambda x : x < float(arg[1:].strip())
+    if arg[0:1] == '>':
+        return lambda x : x > float(arg[1:].strip())
+    match = re.match(r'(\d+(?:\.\d+)?)-(\d+(?:\.\d+))', arg)
+    if match is not None:
+        return lambda x : float(match.group(1)) <= x <= float(match.group(2))
+    raise ValueError('Could not parse "' + arg + '" as a range')
 
 class Record:
     """A record fetched from RBN"""
@@ -117,7 +140,7 @@ class Record:
         return True
 
     def __str__(self):
-        return str(self.time[0]) + ':' + str(self.time[1]) + 'Z  ' +\
+        return ('%02d'%self.time[0]) + ':' + ('%02d'%self.time[1]) + 'Z  ' +\
                 'DX de ' + (self.station_dx + ':').ljust(12) + '  ' +\
                 band_to_str(self.band()).rjust(4) + '  ' +\
                 str(self.frequency).rjust(10) + '  ' +\
@@ -128,14 +151,29 @@ class Record:
 
 def connect(call, host, port, timeout):
     """Connect to an RBN server"""
-    conn = Telnet(host, port, timeout)
+    conn = telnetlib.Telnet(host, port, timeout)
     conn.read_until('Please enter your call:'.encode('ascii'))
     conn.write((call + '\n').encode('ascii'))
     return conn
 
 def main():
     """Main program"""
-    prs = ArgumentParser(description='Reverse Beacon Network logger')
+    prs = argparse.ArgumentParser(
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            description='''Reverse Beacon Network logger''',
+            epilog=textwrap.dedent('''\
+                All non-range filter arguments can be prepended with ~ to invert them.
+
+                Range filters:
+                 - =x    Value should be equal to x
+                 - /=x   Value should not be equal to x
+                 - <x    Value should be smaller than x
+                 - >x    Value should be greater than x
+                 - <=x   Value should be smaller than or equal to x
+                 - >=x   Value should be greater than or equal to x
+                 - x-y   Value should be between x and y (inclusive)
+                 - A comma-separated list of range filters
+            '''))
 
     prs.add_argument('-c', '--call', help='Your identification', required=True)
     prs.add_argument('-H', '--host', help='Telnet host', default=HOST)
@@ -144,7 +182,18 @@ def main():
 
     prs.add_argument('--de', help='Filter transmitting station (regex)')
     prs.add_argument('--dx', help='Filter skimming station (regex)')
-    prs.add_argument('--band', help='Filter band (comma-separated integers)')
+    prs.add_argument('-b', '--band',
+            help='Filter band (comma-separated integers)')
+    prs.add_argument('-m', '--mode',
+            help='Filter mode (comma-separated strings)')
+    prs.add_argument('-f', '--frequency',
+            help='Filter frequency in MHz (range filter, see below)')
+    prs.add_argument('-s', '--speed',
+            help='Filter transmission speed (range filter, see below)')
+    prs.add_argument('-S', '--signal',
+            help='Filter signal strength in dB (range filter, see below)')
+    prs.add_argument('-t', '--type', dest='record_type',
+            help='Filter record type (comma-separated; e.g. CQ or BEACON)')
 
     args = prs.parse_args()
 
@@ -152,7 +201,29 @@ def main():
 
     filters = dict(de=args.de, dx=args.dx)
     if args.band is not None:
-        filters['band'] = list(map(int, args.band.split(',')))
+        invert = args.band[0] == '~'
+        if invert:
+            args.band = args.band[1:]
+        filters['band'] = (list(map(int, args.band.split(','))), invert)
+    if args.mode is not None:
+        invert = args.mode[0] == '~'
+        if invert:
+            args.mode = args.mode[1:]
+        filters['mode'] = (args.mode.split(','), invert)
+    if args.record_type is not None:
+        invert = args.record_type[0] == '~'
+        if invert:
+            args.record_type = args.record_type[1:]
+        filters['record_type'] = (args.record_type.split(','), invert)
+    if args.frequency is not None:
+        filters['frequency'] = list(map(
+            parse_range_filter, args.frequency.split(',')))
+    if args.speed is not None:
+        speed_filters = list(map(parse_range_filter, args.speed.split(',')))
+        filters['speed'] = lambda x : matches(speed_filters, x[0])
+    if args.signal is not None:
+        filters['signal'] = list(map(
+            parse_range_filter, args.signal.split(',')))
 
     line = None
     while line is None or line != '':
