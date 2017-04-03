@@ -237,6 +237,8 @@ def main():
             if rec.match(**filters):
                 if args.mark and args.call in rec.station_de.split('/'):
                     print('\033[1;33m{}\033[m'.format(rec))
+                elif args.mark and args.call in rec.station_dx.split('-'):
+                    print('\033[1;36m{}\033[m'.format(rec))
                 else:
                     print(rec)
         except ValueError:
