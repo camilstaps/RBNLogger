@@ -195,6 +195,10 @@ def main():
     prs.add_argument('-t', '--type', dest='record_type',
             help='Filter record type (comma-separated; e.g. CQ or BEACON)')
 
+    prs.add_argument('-M', '--no-mark',
+            dest='mark', action='store_false', default=True,
+            help='Mark entries with your callsign (uses ANSI escape codes)')
+
     args = prs.parse_args()
 
     conn = connect(args.call, args.host, args.port, args.timeout)
@@ -231,7 +235,10 @@ def main():
         try:
             rec = Record(line.decode('ascii').strip())
             if rec.match(**filters):
-                print(rec)
+                if args.mark and args.call in rec.station_de.split('/'):
+                    print('\033[1;33m{}\033[m'.format(rec))
+                else:
+                    print(rec)
         except ValueError:
             pass
 
