@@ -197,7 +197,7 @@ def main():
 
     prs.add_argument('-M', '--no-mark',
             dest='mark', action='store_false', default=True,
-            help='Mark entries with your callsign (uses ANSI escape codes)')
+            help='Do not mark entries with your callsign (uses ANSI escape codes)')
 
     args = prs.parse_args()
 
